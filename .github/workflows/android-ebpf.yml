@@ -8,8 +8,9 @@ on:
         type: choice
         options:
           - reF1nd-testing
-          - reF1nd-stable
           - reF1nd-testing-next
+          - reF1nd-stable
+          - reF1nd-stable-next
         default: reF1nd-testing
 
 permissions:
