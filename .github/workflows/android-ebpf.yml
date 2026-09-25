@@ -1,1 +1,104 @@
-111
+name: Build Android eBPF
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'reF1nd 分支'
+        type: choice
+        options:
+          - reF1nd-testing
+          - reF1nd-stable
+          - reF1nd-testing-next
+        default: reF1nd-testing
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build (${{ matrix.target.goarch }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - goarch: arm64
+            compiler: aarch64-linux-android35-clang
+          - goarch: arm
+            goarm: "7"
+            compiler: armv7a-linux-androideabi35-clang
+          - goarch: amd64
+            compiler: x86_64-linux-android35-clang
+          - goarch: "386"
+            compiler: i686-linux-android35-clang
+    steps:
+      - name: Checkout reF1nd/sing-box
+        uses: actions/checkout@v6
+        with:
+          repository: reF1nd/sing-box
+          ref: ${{ inputs.ref || 'reF1nd-testing' }}
+          fetch-depth: 0
+
+      - name: Read build parameters
+        id: cfg
+        run: |
+          set -euo pipefail
+          f=.github/workflows/android-ebpf.yml
+          get() { grep -m1 -- "$1" "$f" | sed "s/.*$1 *//" | tr -d '"' | xargs; }
+          TAGS="$(get 'BASE_TAGS:')" || true
+          GOV="$(get 'go-version:')" || true
+          NDK="$(get 'ndk-version:')" || true
+          [ -n "$TAGS" ] || TAGS="with_quic,with_dhcp,with_utls,with_clash_api,with_ebpf,badlinkname,tfogo_checklinkname0"
+          [ -n "$GOV" ]  || GOV="1.26.8"
+          [ -n "$NDK" ]  || NDK="r29"
+          {
+            echo "tags=$TAGS"
+            echo "go=$GOV"
+            echo "ndk=$NDK"
+          } >> "$GITHUB_OUTPUT"
+          echo "TAGS=$TAGS  GO=$GOV  NDK=$NDK"
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ steps.cfg.outputs.go }}
+
+      - name: Compute version
+        id: ver
+        run: |
+          set -euo pipefail
+          git fetch --tags --force https://github.com/SagerNet/sing-box.git
+          BASE="$(git describe --tags --abbrev=0 --match 'v[0-9]*' --exclude '*-reF1nd*' 2>/dev/null || echo v0.0.0)"
+          VERSION="${BASE#v}-$(git rev-parse --short HEAD)"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "reF1nd commit: $(git rev-parse HEAD)"
+          echo "VERSION=$VERSION"
+
+      - name: Setup Android NDK
+        id: setup-ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: ${{ steps.cfg.outputs.ndk }}
+
+      - name: Build
+        env:
+          CGO_ENABLED: "1"
+          GOOS: android
+          GOARCH: ${{ matrix.target.goarch }}
+          GOARM: ${{ matrix.target.goarm }}
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          CC: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/${{ matrix.target.compiler }}
+        run: |
+          export TAGS="${{ steps.cfg.outputs.tags }}"
+          make build VERSION="$VERSION"
+          ./sing-box version | head -2
+
+      - name: Upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: sing-box-android-${{ matrix.target.goarch }}-with-ebpf-${{ steps.ver.outputs.version }}
+          path: sing-box
+          retention-days: 7
+          if-no-files-found: error
