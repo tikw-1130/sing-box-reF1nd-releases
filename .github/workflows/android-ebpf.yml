@@ -65,15 +65,19 @@ jobs:
         with:
           go-version: ${{ steps.cfg.outputs.go }}
 
+      # 改动点：不再用 --exclude '*-reF1nd*' 去“猜上游版本”。
+      # reF1nd 每次都会给分支 tip 打 v<上游版本>-reF1nd 标签，直接取离 HEAD 最近的标签即可。
       - name: Compute version
         id: ver
         run: |
           set -euo pipefail
-          git fetch --tags --force https://github.com/SagerNet/sing-box.git
-          BASE="$(git describe --tags --abbrev=0 --match 'v[0-9]*' --exclude '*-reF1nd*' 2>/dev/null || echo v0.0.0)"
-          VERSION="${BASE#v}-$(git rev-parse --short HEAD)"
+          BASE="$(git describe --tags --abbrev=0 2>/dev/null || echo v0.0.0)"
+          BASE="${BASE#v}"          # 去掉前导 v
+          BASE="${BASE%-reF1nd}"    # 去掉 reF1nd 后缀 → 1.15.0-alpha.9
+          VERSION="${BASE}-$(git rev-parse --short HEAD)"
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "nearest tag: $(git describe --tags --abbrev=0 2>/dev/null || echo none)"
           echo "reF1nd commit: $(git rev-parse HEAD)"
           echo "VERSION=$VERSION"
 
