@@ -65,16 +65,29 @@ jobs:
         with:
           go-version: ${{ steps.cfg.outputs.go }}
 
-      # 改动点：不再用 --exclude '*-reF1nd*' 去“猜上游版本”。
-      # reF1nd 每次都会给分支 tip 打 v<上游版本>-reF1nd 标签，直接取离 HEAD 最近的标签即可。
       - name: Compute version
         id: ver
         run: |
           set -euo pipefail
-          BASE="$(git describe --tags --abbrev=0 2>/dev/null || echo v0.0.0)"
-          BASE="${BASE#v}"          # 去掉前导 v
-          BASE="${BASE%-reF1nd}"    # 去掉 reF1nd 后缀 → 1.15.0-alpha.9
+          REF="${{ inputs.ref || 'reF1nd-testing' }}"
+
+          BASE="$(git describe --tags --abbrev=0 2>/dev/null || true)"
+          if [[ "$BASE" != *-reF1nd* ]]; then
+            if [[ "$REF" == *testing* ]]; then
+              FAMILY='^v[0-9.]+-(alpha|beta|rc)[0-9.]*-reF1nd$'
+            else
+              FAMILY='^v[0-9.]+-reF1nd$'
+            fi
+            FALLBACK="$(git tag --sort=-v:refname | grep -E "$FAMILY" | head -1 || true)"
+            echo "::warning::tip 上没有 reF1nd 标签（describe=$BASE），回退到 $FALLBACK"
+            BASE="${FALLBACK:-$BASE}"
+          fi
+
+          BASE="${BASE#v}"
+          BASE="${BASE%%-reF1nd*}"
+          [ -n "$BASE" ] || BASE="0.0.0"
           VERSION="${BASE}-$(git rev-parse --short HEAD)"
+
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "nearest tag: $(git describe --tags --abbrev=0 2>/dev/null || echo none)"
