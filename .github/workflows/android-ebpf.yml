@@ -109,17 +109,6 @@ jobs:
         with:
           ndk-version: ${{ steps.cfg.outputs.ndk }}
 
-      # 缓存 Go 模块与编译缓存：命中后 Build 无需联网，天然免疫代理中断
-      - name: Cache Go modules
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/go/pkg/mod
-            ~/.cache/go-build
-          key: go-${{ runner.os }}-${{ steps.cfg.outputs.go }}-${{ hashFiles('go.sum') }}
-          restore-keys: |
-            go-${{ runner.os }}-${{ steps.cfg.outputs.go }}-
-
       - name: Build
         env:
           CGO_ENABLED: "1"
@@ -146,6 +135,19 @@ jobs:
 
           make build VERSION="$VERSION"
           ./sing-box version | head -2
+
+      # 只缓存 Go 模块目录；不缓存 ~/.cache/go-build（体积大、跨 runner tar 易炸）
+      # 模块目录已存在（命中）时不清空也不覆盖，避免 tar 报 "Cannot open: File exists"
+      - name: Cache Go modules
+        if: always()
+        continue-on-error: true
+        uses: actions/cache@v4
+        with:
+          path: ~/go/pkg/mod
+          key: gomod-${{ runner.os }}-${{ steps.cfg.outputs.go }}-${{ hashFiles('go.sum') }}
+          restore-keys: |
+            gomod-${{ runner.os }}-${{ steps.cfg.outputs.go }}-${{ hashFiles('go.sum') }}
+            gomod-${{ runner.os }}-${{ steps.cfg.outputs.go }}-
 
       - name: Upload
         uses: actions/upload-artifact@v7
