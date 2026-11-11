@@ -12,9 +12,32 @@ on:
           - reF1nd-stable
           - reF1nd-stable-next
         default: reF1nd-testing
+      tags:
+        description: '构建 tag（留空用上游 BASE_TAGS）'
+        type: string
+        default: ''
+      go-version:
+        description: 'Go 版本'
+        type: string
+        default: '1.26.8'
+      ndk-version:
+        description: 'NDK 版本'
+        type: string
+        default: 'r29'
+      goproxy:
+        description: 'GOPROXY（逗号分隔，按顺序回退）'
+        type: string
+        default: 'https://proxy.golang.org,https://goproxy.cn,https://goproxy.io,direct'
 
 permissions:
   contents: read
+
+env:
+  BASE_TAGS: with_quic,with_dhcp,with_utls,with_clash_api,with_ebpf,badlinkname,tfogo_checklinkname0
+  GO_VERSION: '1.26.8'
+  NDK_VERSION: 'r29'
+  # 模块代理走多个源顺序回退：proxy.golang.org 偶发 HTTP/2 流中断（stream error: stream ID N; INTERNAL_ERROR）
+  GOPROXY_LIST: https://proxy.golang.org,https://goproxy.cn,https://goproxy.io,direct
 
 jobs:
   build:
@@ -43,22 +66,32 @@ jobs:
 
       - name: Read build parameters
         id: cfg
+        env:
+          IN_TAGS: ${{ inputs.tags }}
+          IN_GO: ${{ inputs['go-version'] }}
+          IN_NDK: ${{ inputs['ndk-version'] }}
+          IN_PROXY: ${{ inputs.goproxy }}
         run: |
           set -euo pipefail
+          # 上游 sing-box workflow 里的默认值（本分支结构变化时自动退化到下面的硬编码兜底）
           f=.github/workflows/android-ebpf.yml
-          get() { grep -m1 -- "$1" "$f" | sed "s/.*$1 *//" | tr -d '"' | xargs; }
-          TAGS="$(get 'BASE_TAGS:')" || true
-          GOV="$(get 'go-version:')" || true
-          NDK="$(get 'ndk-version:')" || true
-          [ -n "$TAGS" ] || TAGS="with_quic,with_dhcp,with_utls,with_clash_api,with_ebpf,badlinkname,tfogo_checklinkname0"
-          [ -n "$GOV" ]  || GOV="1.26.8"
-          [ -n "$NDK" ]  || NDK="r29"
+          get() { grep -m1 -- "$1" "$f" 2>/dev/null | sed "s/.*$1 *//" | tr -d '"' | xargs || true; }
+          UP_TAGS="$(get 'BASE_TAGS:')"
+          UP_GO="$(get 'go-version:' | grep -E '^[0-9]+\.[0-9]+(\.[0-9]+)?$' || true)"
+          UP_NDK="$(get 'ndk-version:' | grep -E '^r[0-9]+$' || true)"
+
+          TAGS="${IN_TAGS:-${UP_TAGS:-$BASE_TAGS}}"
+          GOV="${IN_GO:-${UP_GO:-$GO_VERSION}}"
+          NDK="${IN_NDK:-${UP_NDK:-$NDK_VERSION}}"
+          PROXY="${IN_PROXY:-$GOPROXY_LIST}"
+
           {
             echo "tags=$TAGS"
             echo "go=$GOV"
             echo "ndk=$NDK"
+            echo "goproxy=$PROXY"
           } >> "$GITHUB_OUTPUT"
-          echo "TAGS=$TAGS  GO=$GOV  NDK=$NDK"
+          echo "TAGS=$TAGS  GO=$GOV  NDK=$NDK  GOPROXY=$PROXY"
 
       - name: Setup Go
         uses: actions/setup-go@v6
@@ -100,6 +133,17 @@ jobs:
         with:
           ndk-version: ${{ steps.cfg.outputs.ndk }}
 
+      # 缓存 Go 模块：命中后 Build 根本不需要再联网，从根上躲开代理中断
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-${{ runner.os }}-${{ steps.cfg.outputs.go }}-${{ hashFiles('go.sum') }}
+          restore-keys: |
+            go-${{ runner.os }}-${{ steps.cfg.outputs.go }}-
+
       - name: Build
         env:
           CGO_ENABLED: "1"
@@ -108,8 +152,28 @@ jobs:
           GOARM: ${{ matrix.target.goarm }}
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
           CC: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/${{ matrix.target.compiler }}
+          GOPROXY: ${{ steps.cfg.outputs.goproxy }}
         run: |
           export TAGS="${{ steps.cfg.outputs.tags }}"
+
+          # 依赖先单独下载并重试：Go 抓 module zip 不续传，HTTP/2 流一断就整次失败
+          ok=0
+          for i in 1 2 3 4 5; do
+            echo "::group::go mod download (第 $i 次尝试, GOPROXY=$GOPROXY)"
+            if go mod download all; then
+              ok=1
+              echo "::endgroup::"
+              break
+            fi
+            echo "::endgroup::"
+            echo "::warning::go mod download 第 $i 次失败，10 秒后重试"
+            sleep 10
+          done
+          if [ "$ok" != "1" ]; then
+            echo "::error::依赖下载 5 次均失败，检查 GOPROXY 或网络"
+            exit 1
+          fi
+
           make build VERSION="$VERSION"
           ./sing-box version | head -2
 
