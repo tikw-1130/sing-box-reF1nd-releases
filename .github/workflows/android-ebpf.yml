@@ -52,9 +52,13 @@ jobs:
           set -euo pipefail
           f=.github/workflows/android-ebpf.yml
           get() { grep -m1 -- "$1" "$f" | sed "s/.*$1 *//" | tr -d '"' | xargs; }
+          # 只接受"值形状"正确的匹配行，避免 grep -m1 命中的是别的上下文
           TAGS="$(get 'BASE_TAGS:')"
+          [[ "$TAGS" == *with_* ]] || TAGS=""
           GOV="$(get 'go-version:')"
+          [[ "$GOV" =~ ^[0-9]+\.[0-9]+ ]] || GOV=""
           NDK="$(get 'ndk-version:')"
+          [[ "$NDK" =~ ^r[0-9]+$ ]] || NDK=""
           [ -n "$TAGS" ] || TAGS="with_quic,with_dhcp,with_utls,with_clash_api,with_ebpf,badlinkname,tfogo_checklinkname0"
           [ -n "$GOV" ]  || GOV="1.26.8"
           [ -n "$NDK" ]  || NDK="r29"
