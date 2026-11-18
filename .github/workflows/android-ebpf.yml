@@ -1,4 +1,4 @@
-name: Build Android eBPF
+name: Build Android arm64
 
 on:
   workflow_dispatch:
@@ -7,79 +7,68 @@ on:
         description: 'reF1nd 分支'
         type: choice
         options:
-          - reF1nd-testing
           - reF1nd-testing-next
-          - reF1nd-stable
+          - reF1nd-testing
           - reF1nd-stable-next
-        default: reF1nd-testing
+          - reF1nd-stable
+        default: reF1nd-testing-next
 
 permissions:
-  contents: read
+  contents: write
 
-# 与上游 reF1nd/sing-box 的 .github/workflows/android-ebpf.yml 保持一致：
-# Go 版本 / NDK / 构建 tag 都直接读上游文件，不再在此处写死。
-# 唯一区别是 Build 前加了依赖下载重试 + 多源 GOPROXY + 模块缓存，
-# 用来绕开 Go module proxy 偶发的 stream error: stream ID N; INTERNAL_ERROR。
+concurrency:
+  group: android-build-${{ inputs.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
-    name: Build (${{ matrix.target.goarch }})
+    name: Build (android/arm64)
     runs-on: ubuntu-24.04
-    strategy:
-      fail-fast: false
-      matrix:
-        target:
-          - goarch: arm64
-            compiler: aarch64-linux-android35-clang
-          - goarch: arm
-            goarm: "7"
-            compiler: armv7a-linux-androideabi35-clang
-          - goarch: amd64
-            compiler: x86_64-linux-android35-clang
-          - goarch: "386"
-            compiler: i686-linux-android35-clang
     steps:
       - name: Checkout reF1nd/sing-box
         uses: actions/checkout@v6
         with:
           repository: reF1nd/sing-box
-          ref: ${{ inputs.ref || 'reF1nd-testing' }}
+          ref: ${{ inputs.ref || 'reF1nd-testing-next' }}
           fetch-depth: 0
 
       - name: Read build parameters
         id: cfg
+        shell: bash
         run: |
           set -euo pipefail
           f=.github/workflows/android-ebpf.yml
-          get() { grep -m1 -- "$1" "$f" | sed "s/.*$1 *//" | tr -d '"' | xargs; }
-          # 只接受"值形状"正确的匹配行，避免 grep -m1 命中的是别的上下文
+          get() { [ -f "$f" ] && grep -m1 -- "$1" "$f" | sed "s/.*$1 *//" | tr -d '"*[:space:]' || true; }
           TAGS="$(get 'BASE_TAGS:')"
-          [[ "$TAGS" == *with_* ]] || TAGS=""
+          [[ "$TAGS" == *with_* ]] || TAGS="with_quic,with_dhcp,with_utls,with_clash_api,with_ebpf,badlinkname,tfogo_checklinkname0"
           GOV="$(get 'go-version:')"
-          [[ "$GOV" =~ ^[0-9]+\.[0-9]+ ]] || GOV=""
+          [[ "$GOV" =~ ^[0-9]+\.[0-9]+ ]] || GOV="1.26.8"
           NDK="$(get 'ndk-version:')"
-          [[ "$NDK" =~ ^r[0-9]+$ ]] || NDK=""
-          [ -n "$TAGS" ] || TAGS="with_quic,with_dhcp,with_utls,with_clash_api,with_ebpf,badlinkname,tfogo_checklinkname0"
-          [ -n "$GOV" ]  || GOV="1.26.8"
-          [ -n "$NDK" ]  || NDK="r29"
-          {
-            echo "tags=$TAGS"
-            echo "go=$GOV"
-            echo "ndk=$NDK"
-          } >> "$GITHUB_OUTPUT"
-          echo "TAGS=$TAGS  GO=$GOV  NDK=$NDK"
+          [[ "$NDK" =~ ^r[0-9]+$ ]] || NDK="r29"
+          echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
+          echo "go=$GOV" >> "$GITHUB_OUTPUT"
+          echo "ndk=$NDK" >> "$GITHUB_OUTPUT"
+          echo "TAGS=$TAGS GO=$GOV NDK=$NDK"
 
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
           go-version: ${{ steps.cfg.outputs.go }}
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Setup Android NDK
+        id: setup-ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: ${{ steps.cfg.outputs.ndk }}
 
       - name: Compute version
         id: ver
+        shell: bash
         run: |
           set -euo pipefail
-          REF="${{ inputs.ref || 'reF1nd-testing' }}"
-
+          REF="${{ inputs.ref || 'reF1nd-testing-next' }}"
           BASE="$(git describe --tags --abbrev=0 2>/dev/null || true)"
           if [[ "$BASE" != *-reF1nd* ]]; then
             if [[ "$REF" == *testing* ]]; then
@@ -88,58 +77,62 @@ jobs:
               FAMILY='^v[0-9.]+-reF1nd$'
             fi
             FALLBACK="$(git tag --sort=-v:refname | grep -E "$FAMILY" | head -1 || true)"
-            echo "::warning::tip 上没有 reF1nd 标签（describe=$BASE），回退到 $FALLBACK"
+            echo "::warning::tip 上没有 reF1nd 标签（describe=$BASE），回退到 ${FALLBACK:-无}"
             BASE="${FALLBACK:-$BASE}"
           fi
-
           BASE="${BASE#v}"
           BASE="${BASE%%-reF1nd*}"
           [ -n "$BASE" ] || BASE="0.0.0"
           VERSION="${BASE}-$(git rev-parse --short HEAD)"
-
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "nearest tag: $(git describe --tags --abbrev=0 2>/dev/null || echo none)"
-          echo "reF1nd commit: $(git rev-parse HEAD)"
-          echo "VERSION=$VERSION"
-
-      - name: Setup Android NDK
-        id: setup-ndk
-        uses: nttld/setup-ndk@v1
-        with:
-          ndk-version: ${{ steps.cfg.outputs.ndk }}
+          echo "VERSION=$VERSION  HEAD=$(git rev-parse HEAD)"
 
       - name: Build
+        shell: bash
         env:
           CGO_ENABLED: "1"
           GOOS: android
-          GOARCH: ${{ matrix.target.goarch }}
-          GOARM: ${{ matrix.target.goarm }}
+          GOARCH: arm64
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-          CC: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/${{ matrix.target.compiler }}
-          # 多源顺序回退，官方源挂了自动切镜像
+          CC: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android35-clang
           GOPROXY: https://proxy.golang.org,https://goproxy.cn,https://goproxy.io,direct
         run: |
+          set -euo pipefail
           export TAGS="${{ steps.cfg.outputs.tags }}"
-
-          # 先单独拉依赖并重试：Go 抓 module zip 不续传，HTTP/2 流一断就整次构建失败
           for i in 1 2 3 4 5; do
-            echo "==> go mod download ($i/5, GOPROXY=$GOPROXY)"
-            if go mod download all; then
-              echo "==> 依赖就绪"
-              break
-            fi
+            echo "==> go mod download ($i/5)"
+            if go mod download; then break; fi
             [ "$i" = 5 ] && { echo "::error::依赖下载 5 次均失败"; exit 1; }
             sleep 10
           done
-
           make build VERSION="$VERSION"
-          ./sing-box version | head -2
+          ls -lh sing-box
+          sha256sum sing-box | tee sing-box.sha256
 
-      - name: Upload
-        uses: actions/upload-artifact@v7
+      - name: Verify artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          file sing-box
+          readelf -h sing-box | grep -E 'Class|Machine'
+          go version -m sing-box | grep -E 'vcs.revision|-tags' || true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
         with:
-          name: sing-box-android-${{ matrix.target.goarch }}-with-ebpf-${{ steps.ver.outputs.version }}
-          path: sing-box
-          retention-days: 7
-          if-no-files-found: error
+          name: sing-box-android-arm64-${{ env.VERSION }}
+          path: |
+            sing-box
+            sing-box.sha256
+          retention-days: 30
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: android-arm64-${{ inputs.ref }}-${{ env.VERSION }}
+          name: android/arm64 ${{ inputs.ref }} ${{ env.VERSION }}
+          files: |
+            sing-box
+            sing-box.sha256
+          make_latest: false
